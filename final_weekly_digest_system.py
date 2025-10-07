@@ -16,6 +16,10 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from collections import Counter, defaultdict
 import re
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -142,16 +146,67 @@ class FinalWeeklyDigestSystem:
             
             messages = []
             for msg in response['messages']:
-                if msg.get('type') == 'message' and not msg.get('bot_id'):
-                    message_data = MessageData(
-                        user=msg.get('user', 'Unknown'),
-                        text=msg.get('text', ''),
-                        timestamp=msg.get('ts', ''),
-                        thread_ts=msg.get('thread_ts'),
-                        reactions=msg.get('reactions', []),
-                        attachments=msg.get('attachments', [])
-                    )
-                    messages.append(message_data)
+                if msg.get('type') == 'message':
+                    # Include bot messages that contain user requests (like workflow requests)
+                    # Exclude only system messages or pure bot notifications
+                    text = msg.get('text', '').lower()
+                    is_workflow_request = any(keyword in text for keyword in [
+                        'new request from', 'request type', 'priority', 'summary', 'description'
+                    ])
+                    
+                    if not msg.get('bot_id') or is_workflow_request:
+                        # Filter for messages that came via Nucleus and TrustView automation workflows
+                        text = msg.get('text', '')
+                        text_lower = text.lower()
+                        
+                        # Look for messages that came via Nucleus or Trust View workflow automation
+                        # These are typically bot messages with specific patterns
+                        text = msg.get('text', '')
+                        text_lower = text.lower()
+                        
+                        # Check if this is a Nucleus workflow automation message
+                        is_nucleus_automation = False
+                        if 'request type:' in text_lower:
+                            # Extract the request type to check if it's specifically Nucleus
+                            request_type_start = text.find('Request Type:') + len('Request Type:')
+                            request_type_end = text.find('*Priority:*', request_type_start)
+                            if request_type_end == -1:
+                                request_type_end = text.find('*Subrequest Type:*', request_type_start)
+                            if request_type_end == -1:
+                                request_type_end = request_type_start + 100
+                            
+                            request_type = text[request_type_start:request_type_end].strip().replace('*', '').strip().lower()
+                            is_nucleus_automation = 'nucleus' in request_type
+                        
+                        # Check if this is a Trust View workflow automation message
+                        # Only include messages where Request Type is specifically "Trust View"
+                        is_trustview_automation = False
+                        if 'request type:' in text_lower:
+                            # Extract the request type to check if it's specifically "Trust View"
+                            request_type_start = text.find('Request Type:') + len('Request Type:')
+                            request_type_end = text.find('*Priority:*', request_type_start)
+                            if request_type_end == -1:
+                                request_type_end = text.find('*Subrequest Type:*', request_type_start)
+                            if request_type_end == -1:
+                                request_type_end = request_type_start + 100
+                            
+                            request_type = text[request_type_start:request_type_end].strip().replace('*', '').strip().lower()
+                            is_trustview_automation = request_type.strip() == 'trust view'
+                        
+                        # Debug logging
+                        if is_nucleus_automation or is_trustview_automation:
+                            logger.debug(f"Including message: Nucleus={is_nucleus_automation}, TrustView={is_trustview_automation}")
+                        
+                        if is_nucleus_automation or is_trustview_automation:
+                            message_data = MessageData(
+                                user=msg.get('user', 'Unknown'),
+                                text=msg.get('text', ''),
+                                timestamp=msg.get('ts', ''),
+                                thread_ts=msg.get('thread_ts'),
+                                reactions=msg.get('reactions', []),
+                                attachments=msg.get('attachments', [])
+                            )
+                            messages.append(message_data)
             
             return messages
             
@@ -202,16 +257,36 @@ class FinalWeeklyDigestSystem:
         # Determine if it's a question
         is_question = any(word in text for word in ['?', 'question', 'how', 'what', 'why', 'when', 'where', 'can you', 'could you', 'help'])
         
-        # Determine workflow type
+        # Determine workflow type based on Request Type (more precise)
         workflow = "Other"
-        if any(word in text for word in ['nucleus', 'nucleus dashboard']):
-            workflow = "Nucleus"
-        elif any(word in text for word in ['trust', 'trust view', 'trust dashboard']):
-            workflow = "Trust View"
-        elif any(word in text for word in ['search', 'search 3.0', 'ingestion']):
-            workflow = "Search"
-        elif any(word in text for word in ['deployment', 'production', 'staging']):
-            workflow = "Deployment"
+        
+        # Check Request Type field first (most reliable)
+        if 'request type:' in text:
+            request_type_start = text.find('request type:') + len('request type:')
+            request_type_end = text.find('*priority:*', request_type_start)
+            if request_type_end == -1:
+                request_type_end = text.find('*subrequest type:*', request_type_start)
+            if request_type_end == -1:
+                request_type_end = request_type_start + 50
+            
+            request_type = text[request_type_start:request_type_end].strip().replace('*', '').strip()
+            
+            if 'nucleus' in request_type:
+                workflow = "Nucleus"
+            elif 'trust view' in request_type:
+                workflow = "Trust View"
+            elif 'trust dashboard' in request_type:
+                workflow = "Trust View"
+        else:
+            # Fallback to general text search
+            if any(word in text for word in ['nucleus', 'nucleus dashboard']):
+                workflow = "Nucleus"
+            elif any(word in text for word in ['trust', 'trust view', 'trust dashboard']):
+                workflow = "Trust View"
+            elif any(word in text for word in ['search', 'search 3.0', 'ingestion']):
+                workflow = "Search"
+            elif any(word in text for word in ['deployment', 'production', 'staging']):
+                workflow = "Deployment"
         
         # Determine resolution confidence based on thread activity and reactions
         resolution_confidence = 0.5  # Default
@@ -271,12 +346,11 @@ class FinalWeeklyDigestSystem:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
         
-        # Generate digest
+        # Generate simplified digest
         digest_parts = []
-        digest_parts.append("📊 **Weekly Digest - Nucleus & Trust View**")
-        digest_parts.append(f"📢 **#{channel_info['name']}**")
-        digest_parts.append(f"📅 {start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')}")
-        digest_parts.append(f"📈 **{total_messages} messages** (all with clickable links)")
+        digest_parts.append("📊 **Weekly Digest - Nucleus & Trust View Automation**")
+        digest_parts.append(f"📢 **#{channel_info['name']}** | 📅 {start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')}")
+        digest_parts.append(f"📈 **{total_messages} messages**")
         digest_parts.append("")
         
         # Workflow breakdown
@@ -285,38 +359,26 @@ class FinalWeeklyDigestSystem:
             digest_parts.append(f"• {workflow}: {count} messages")
         digest_parts.append("")
         
-        # Resolution status summary
-        digest_parts.append("**📊 Resolution Status Summary:**")
-        digest_parts.append(f"• **Total Messages**: {total_messages}")
-        digest_parts.append(f"• **Response Rate**: {((total_messages - needs_attention) / total_messages * 100):.1f}% ({total_messages - needs_attention} with responses)")
-        digest_parts.append(f"• **Resolution Rate**: {((high_confidence_resolved + likely_resolved) / total_messages * 100):.1f}%")
-        digest_parts.append(f"• **High Confidence Resolved**: {high_confidence_resolved} items")
-        digest_parts.append(f"• **Likely Resolved**: {likely_resolved} items")
-        digest_parts.append(f"• **Items Needing Attention**: {needs_attention} items")
+        # Resolution status summary (one-liner)
+        resolved_count = high_confidence_resolved + likely_resolved
+        digest_parts.append(f"**📊 Resolution Status:** {total_messages} total | {resolved_count} resolved | {needs_attention} need attention")
         digest_parts.append("")
         
-        # Jira integration status
-        digest_parts.append("**🎫 Jira Integration (Final Working MCP):**")
-        digest_parts.append(f"• **Jira Tickets Found**: {jira_references} ticket references")
-        digest_parts.append(f"• **Jira Tickets Looked Up**: 0 tickets")
-        digest_parts.append(f"• **Messages with Jira**: {sum(1 for _, cat in categorized_messages if cat['jira_tickets'])} messages")
-        digest_parts.append("")
-        
-        # Daily activity
+        # Daily activity with detailed messages
+        digest_parts.append("**📅 Daily Activity:**")
         for day in sorted(daily_messages.keys(), reverse=True):
             day_messages = daily_messages[day]
-            day_name = datetime.strptime(day, '%Y-%m-%d').strftime('%A, %Y-%m-%d')
+            day_name = datetime.strptime(day, '%Y-%m-%d').strftime('%A, %b %d')
+            digest_parts.append(f"• {day_name}: {len(day_messages)} messages")
             
-            digest_parts.append(f"**📅 {day_name} ({len(day_messages)} messages)**")
-            
+            # Add detailed message list for each day
             for i, (msg, category) in enumerate(day_messages, 1):
                 user_name = self.get_user_info(msg.user)
                 time_str = datetime.fromtimestamp(float(msg.timestamp)).strftime('%H:%M')
                 
-                # Create message summary
+                # Extract subject/title from message
                 text = msg.text.replace('\n', ' ').strip()
-                if len(text) > 100:
-                    text = text[:100] + "..."
+                subject = self._extract_subject(text)
                 
                 # Add severity and status indicators
                 severity_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🔵"}.get(category['severity'], "🟡")
@@ -326,84 +388,89 @@ class FinalWeeklyDigestSystem:
                     status_emoji = "✅"
                     status_text = "RESOLVED"
                 elif category['resolution_confidence'] >= 0.6:
-                    status_emoji = "🟡"
-                    status_text = "LIKELY_RESOLVED"
+                    status_emoji = "🔄"
+                    status_text = "LIKELY"
                 else:
                     status_emoji = "❓"
-                    status_text = "UNKNOWN"
+                    status_text = "NEEDS_ATTENTION"
                 
                 # Add thread indicator
                 thread_indicator = " 📝" if category['has_thread'] else ""
                 
-                # Add Jira ticket indicators
-                jira_indicators = ""
-                if category['jira_tickets']:
-                    jira_indicators = " " + " ".join([f"🎫 <https://jira.autodesk.com/browse/{ticket}|{ticket}>" for ticket in category['jira_tickets'][:3]])
+                # Create expanded message summary with focus on Summary field
+                preview_lines = []
                 
-                # Add confidence score
-                confidence_score = f"({category['resolution_confidence']:.1f})" if category['resolution_confidence'] > 0 else ""
+                # Extract Description field (what user actually typed)
+                description_text = self._extract_description(text)
+                if description_text:
+                    # Split description into 2-3 lines, up to 120 characters each
+                    description_words = description_text.split()
+                    
+                    # Create 2-3 lines with better word distribution
+                    total_words = len(description_words)
+                    words_per_line = max(1, total_words // 2)  # At least 1 word per line
+                    
+                    line1_words = description_words[:words_per_line]
+                    line2_words = description_words[words_per_line:]
+                    
+                    # If second line is too long, split it further
+                    if len(' '.join(line2_words)) > 120:
+                        line2_words = description_words[words_per_line:words_per_line + words_per_line]
+                        line3_words = description_words[words_per_line + words_per_line:]
+                        
+                        if line1_words:
+                            preview_lines.append(' '.join(line1_words))
+                        if line2_words:
+                            preview_lines.append(' '.join(line2_words))
+                        if line3_words:
+                            preview_lines.append(' '.join(line3_words))
+                    else:
+                        if line1_words:
+                            preview_lines.append(' '.join(line1_words))
+                        if line2_words:
+                            preview_lines.append(' '.join(line2_words))
                 
-                digest_parts.append(f"{i}. **{user_name}** - {text} {severity_emoji} {category['severity']} | {status_emoji} {status_text} {confidence_score}{thread_indicator}{jira_indicators} <https://autodesk.slack.com/archives/{channel_info['name']}/p{msg.timestamp.replace('.', '')}|(link)>")
-        
-        # Summary statistics
-        digest_parts.append("")
-        digest_parts.append("**📊 Summary:**")
-        digest_parts.append(f"• **Total messages**: {total_messages}")
-        for workflow, count in workflow_counts.most_common():
-            digest_parts.append(f"• **{workflow} workflow**: {count} messages")
-        digest_parts.append("")
+                # If no summary found, fall back to general message preview
+                if not preview_lines:
+                    lines = text.split('\n')
+                    # Take first 2 non-empty lines, up to 120 characters each
+                    for line in lines[:2]:
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            if len(line) > 120:
+                                preview_lines.append(line[:120] + "...")
+                            else:
+                                preview_lines.append(line)
+                            if len(preview_lines) >= 2:  # Limit to 2 lines
+                                break
+                
+                # Extract actual user who made the request from message content
+                actual_user = self._extract_actual_user(text)
+                if actual_user:
+                    user_name = self.get_user_info(actual_user)
+                else:
+                    user_name = self.get_user_info(msg.user)  # Fallback to message user
+                
+                # Format: User name with @, Type, Severity, Resolution, Request in 2-3 lines
+                digest_parts.append(f"  {i}. **@{user_name}** | Type: {subject} | {severity_emoji} {category['severity']} | {status_emoji} {status_text}")
+                for preview_line in preview_lines:
+                    digest_parts.append(f"     {preview_line}")
         
         # Severity breakdown
-        digest_parts.append("**🚨 Severity Breakdown:**")
+        digest_parts.append("")
+        digest_parts.append("**🚨 Severity:**")
         for severity, count in severity_counts.most_common():
-            percentage = (count / total_messages * 100) if total_messages > 0 else 0
             emoji = {"High": "🔴", "Medium": "🟡", "Low": "🔵"}.get(severity, "🟡")
-            digest_parts.append(f"• {emoji} {severity}: {count} messages ({percentage:.0f}%)")
+            digest_parts.append(f"• {emoji} {severity}: {count}")
+        
         digest_parts.append("")
+        digest_parts.append("**🔍 Legends:**")
+        digest_parts.append("**Severity:** 🔴 High | 🟡 Medium | 🔵 Low")
+        digest_parts.append("**Resolution:** ✅ Resolved | 🔄 Likely | ❓ Needs Attention")
+        digest_parts.append("**Thread:** 📝 Has responses")
         
-        # Resolution breakdown
-        digest_parts.append("**✅ Resolution Breakdown:**")
-        resolved_count = high_confidence_resolved + likely_resolved
-        resolved_percentage = (resolved_count / total_messages * 100) if total_messages > 0 else 0
-        unknown_percentage = (needs_attention / total_messages * 100) if total_messages > 0 else 0
-        
-        digest_parts.append(f"• ✅ Resolved: {resolved_count} messages ({resolved_percentage:.0f}%)")
-        digest_parts.append(f"• 🟡 Likely Resolved: {likely_resolved} messages ({likely_resolved/total_messages*100:.0f}%)")
-        digest_parts.append(f"• ❓ Unknown Status: {needs_attention} messages ({unknown_percentage:.0f}%)")
-        digest_parts.append(f"• ❌ Unresolved: 0 messages (0%)")
         digest_parts.append("")
-        
-        # Jira status breakdown
-        digest_parts.append("**🎫 Jira Status Breakdown (Final Working MCP):**")
-        digest_parts.append("• ✅ Done: 0 tickets")
-        digest_parts.append("• 🔄 In Progress: 0 tickets")
-        digest_parts.append("• 📋 To Do: 0 tickets")
-        digest_parts.append("• ❌ Error: 0 tickets")
-        digest_parts.append("")
-        
-        # Legends
-        digest_parts.append("**🔍 Resolution Legend:**")
-        digest_parts.append("• ✅ = High confidence resolved (score ≥3)")
-        digest_parts.append("• 🟢 = Resolved (score <3)")
-        digest_parts.append("• 🟡 = Likely resolved")
-        digest_parts.append("• 🟠 = Possibly resolved")
-        digest_parts.append("• ❌ = Unresolved")
-        digest_parts.append("• ❓ = Unknown status")
-        digest_parts.append("• 📝 = Has thread responses")
-        digest_parts.append("")
-        
-        digest_parts.append("**🎫 Jira Legend (Final Working MCP):**")
-        digest_parts.append("• ✅ = Done/Resolved/Closed")
-        digest_parts.append("• 🔄 = In Progress")
-        digest_parts.append("• 📋 = To Do/Open")
-        digest_parts.append("• 🟡 = Ready")
-        digest_parts.append("• 🚫 = Blocked")
-        digest_parts.append("• ⏳ = Waiting")
-        digest_parts.append("• 🎫 = Jira ticket referenced")
-        digest_parts.append("• ❓ = Unknown status")
-        digest_parts.append("")
-        
-        digest_parts.append("🤖 *Auto-generated weekly digest with resolution tracking & final working MCP Jira lookup*")
+        digest_parts.append("🤖 *Auto-generated weekly digest*")
         digest_parts.append("🔍 *Filtered for: Nucleus & Trust View workflows only*")
         
         return "\n".join(digest_parts)
@@ -435,21 +502,30 @@ class FinalWeeklyDigestSystem:
             logger.info(f"Test digest saved to {filename}")
             return digest_content
         
-        # Try to send digest if recipient email provided
+        # Send digest to Slack channel
+        try:
+            channel_sent = self.send_digest_to_slack_channel(digest_content, "tmp-igors-slack-digests")
+            if channel_sent:
+                logger.info("Weekly digest sent to #tmp-igors-slack-digests successfully!")
+            else:
+                logger.error("Failed to send digest to Slack channel")
+        except Exception as e:
+            logger.error(f"Error sending digest to channel: {e}")
+        
+        # Also try to send digest if recipient email provided
         if recipient_email:
             try:
                 recipient_id = self.get_user_id_by_email(recipient_email)
                 if recipient_id:
                     result = self.send_dm_digest(recipient_id, digest_content)
                     if result:
-                        logger.info("Weekly digest sent successfully!")
-                        return digest_content
+                        logger.info("Weekly digest also sent as DM successfully!")
                     else:
-                        logger.error("Failed to send weekly digest")
+                        logger.error("Failed to send weekly digest as DM")
                 else:
                     logger.error(f"Could not find user with email {recipient_email}")
             except Exception as e:
-                logger.error(f"Error sending digest: {e}")
+                logger.error(f"Error sending digest as DM: {e}")
         
         return digest_content
     
@@ -476,6 +552,89 @@ class FinalWeeklyDigestSystem:
         except SlackApiError as e:
             logger.error(f"Error sending weekly digest: {e}")
             return None
+    
+    def send_digest_to_slack_channel(self, digest_content: str, channel_name: str = "tmp-igors-slack-digests") -> bool:
+        """Send digest content to a Slack channel with one-liner + thread reply format"""
+        try:
+            # Use known channel ID for tmp-igors-slack-digests
+            if channel_name == "tmp-igors-slack-digests":
+                target_channel_id = "C09GY0TUNBS"
+            else:
+                # Find the channel ID for other channels
+                response = self.client.conversations_list(types='public_channel,private_channel')
+                channels = response.get('channels', [])
+                
+                target_channel_id = None
+                for channel in channels:
+                    if channel['name'] == channel_name:
+                        target_channel_id = channel['id']
+                        break
+                
+                if not target_channel_id:
+                    logger.error(f"Channel #{channel_name} not found")
+                    return False
+            
+            # Extract summary info for one-liner
+            lines = digest_content.split('\n')
+            total_messages = 0
+            workflow_breakdown = {}
+            severity_breakdown = {}
+            
+            for line in lines:
+                if "**Total Messages**:" in line:
+                    total_messages = int(line.split(':')[1].strip().split()[0])
+                elif "• Trust View:" in line:
+                    workflow_breakdown['Trust View'] = int(line.split(':')[1].strip().split()[0])
+                elif "• Nucleus:" in line:
+                    workflow_breakdown['Nucleus'] = int(line.split(':')[1].strip().split()[0])
+                elif "• Other:" in line:
+                    workflow_breakdown['Other'] = int(line.split(':')[1].strip().split()[0])
+                elif "🟡 Medium:" in line:
+                    severity_breakdown['Medium'] = int(line.split(':')[1].strip().split()[0])
+                elif "🔴 High:" in line:
+                    severity_breakdown['High'] = int(line.split(':')[1].strip().split()[0])
+                elif "🔵 Low:" in line:
+                    severity_breakdown['Low'] = int(line.split(':')[1].strip().split()[0])
+            
+                # Create simplified one-liner summary
+                workflow_summary = ", ".join([f"{k}: {v}" for k, v in workflow_breakdown.items() if v > 0])
+                severity_summary = ", ".join([f"{k}: {v}" for k, v in severity_breakdown.items() if v > 0])
+                
+                one_liner = f"📊 Weekly Digest: {total_messages} messages | {workflow_summary} | {severity_summary}"
+            
+            # Send one-liner as main message
+            response = self.client.chat_postMessage(
+                channel=target_channel_id,
+                text=one_liner,
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            if not response['ok']:
+                logger.error(f"Failed to send one-liner: {response}")
+                return False
+            
+            main_message_ts = response['ts']
+            logger.info(f"One-liner sent to #{channel_name}")
+            
+            # Send full digest as single thread reply
+            response = self.client.chat_postMessage(
+                channel=target_channel_id,
+                text=digest_content,
+                thread_ts=main_message_ts,
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            if response['ok']:
+                logger.info(f"Full digest sent as single thread reply to #{channel_name}")
+                return True
+            else:
+                logger.error(f"Failed to send thread reply: {response}")
+                return False
+                
+        except SlackApiError as e:
+            logger.error(f"Error sending digest to #{channel_name}: {e}")
+            return False
     
     def create_weekly_digest_for_all_channels(self, recipient_email: str = None, days_back: int = 7, test_mode: bool = False):
         """Create weekly digest for all accessible channels"""
@@ -538,6 +697,96 @@ class FinalWeeklyDigestSystem:
             except Exception as e:
                 logger.error(f"Error in scheduler: {e}")
                 time.sleep(60)
+
+    def _extract_subject(self, text: str) -> str:
+        """Extract a meaningful subject/title from the message text"""
+        # Look for Request Type as the main subject
+        if 'Request Type:' in text:
+            request_type_start = text.find('Request Type:') + len('Request Type:')
+            request_type_end = text.find('*Priority:*', request_type_start)
+            if request_type_end == -1:
+                request_type_end = text.find('*Subrequest Type:*', request_type_start)
+            if request_type_end == -1:
+                request_type_end = request_type_start + 50
+            
+            request_type = text[request_type_start:request_type_end].strip().replace('*', '').strip()
+            if request_type:
+                return request_type
+        
+        # Look for Subrequest Type as secondary subject
+        if 'Subrequest Type:' in text:
+            subrequest_start = text.find('Subrequest Type:') + len('Subrequest Type:')
+            subrequest_end = text.find('*Priority:*', subrequest_start)
+            if subrequest_end == -1:
+                subrequest_end = subrequest_start + 30
+            
+            subrequest_type = text[subrequest_start:subrequest_end].strip().replace('*', '').strip()
+            if subrequest_type:
+                return subrequest_type
+        
+        # Fallback to first line or first 30 characters
+        first_line = text.split('\n')[0].strip()
+        if len(first_line) > 30:
+            return first_line[:30] + "..."
+        return first_line if first_line else "No subject"
+
+    def _extract_summary(self, text: str) -> str:
+        """Extract the Summary field from the message text"""
+        # Look for Summary field
+        if '*Summary:*' in text:
+            summary_start = text.find('*Summary:*') + len('*Summary:*')
+            summary_end = text.find('*Application Name:*', summary_start)
+            if summary_end == -1:
+                summary_end = text.find('*Alias or Service ID:*', summary_start)
+            if summary_end == -1:
+                summary_end = text.find('*Division:*', summary_start)
+            if summary_end == -1:
+                summary_end = summary_start + 200  # Fallback to 200 chars
+            
+            summary = text[summary_start:summary_end].strip().replace('*', '').strip()
+            if summary:
+                return summary
+        
+        return ""
+
+    def _extract_description(self, text: str) -> str:
+        """Extract the Description field from the message text (what user actually typed)"""
+        # Look for Description field
+        if '*Description:*' in text:
+            description_start = text.find('*Description:*') + len('*Description:*')
+            description_end = text.find('*Application Name:*', description_start)
+            if description_end == -1:
+                description_end = text.find('*Alias or Service ID:*', description_start)
+            if description_end == -1:
+                description_end = text.find('*Division:*', description_start)
+            if description_end == -1:
+                description_end = description_start + 300  # Fallback to 300 chars for longer descriptions
+            
+            description = text[description_start:description_end].strip().replace('*', '').strip()
+            if description:
+                return description
+        
+        # If no Description field, fall back to Summary
+        return self._extract_summary(text)
+
+    def _extract_actual_user(self, text: str) -> str:
+        """Extract the actual user who made the request from message content"""
+        import re
+        
+        # Look for pattern: "New request from <@USER_ID> via <@BOT_ID>"
+        pattern = r'New request from <@([A-Z0-9]+)> via'
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+        
+        # Look for any user mention in the text
+        pattern = r'<@([A-Z0-9]+)>'
+        matches = re.findall(pattern, text)
+        if matches:
+            # Return the first user mention (usually the requester)
+            return matches[0]
+        
+        return ""
 
 def main():
     """Main function for testing the final digest system"""
