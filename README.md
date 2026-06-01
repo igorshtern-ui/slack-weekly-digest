@@ -31,6 +31,28 @@ The Slack Weekly Digest System automatically monitors Slack channels for automat
 - **Error Handling**: Robust error handling and logging
 - **Configurable Timeframes**: Adjustable lookback periods
 
+## Source control
+
+| Role | Host | URL |
+|------|------|-----|
+| **Primary** | Autodesk Git | https://git.autodesk.com/shterni/slack-weekly-digest |
+| **Mirror** | GitHub | https://github.com/igorshtern-ui/slack-weekly-digest |
+
+Clone from Autodesk (recommended for Autodesk collaborators):
+
+```bash
+git clone https://git.autodesk.com/shterni/slack-weekly-digest.git
+cd slack-weekly-digest
+```
+
+After commits, push to both remotes:
+
+```bash
+make push-both
+```
+
+`main` tracks `autodesk/main`. GitHub (`origin`) is kept in sync as a public mirror.
+
 ## 🚀 Installation
 
 ### Prerequisites
@@ -40,10 +62,10 @@ The Slack Weekly Digest System automatically monitors Slack channels for automat
 
 ### Setup Steps
 
-1. **Clone the repository:**
+1. **Clone the repository** (see [Source control](#source-control) for primary vs mirror URLs):
 ```bash
-git clone https://github.com/igorshtern-ui/slack-weekly-digest.git
-cd slack-weekly-digest-test
+git clone https://git.autodesk.com/shterni/slack-weekly-digest.git
+cd slack-weekly-digest
 ```
 
 2. **Install dependencies:**
